@@ -3,8 +3,8 @@
 venv/
 ENV/
 
-# Databases (crucial to prevent pushing the 145MB data_prices.db and test results)
-*.db
+# Exclude large raw database only (145MB - exceeds GitHub 100MB limit)
+data_prices.db
 
 # Log files
 *.log
