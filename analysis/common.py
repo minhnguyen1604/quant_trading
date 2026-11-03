@@ -187,6 +187,7 @@ def run_exit(df, rule=None, fast=9, slow=45, comm=COMM):
     if cur is not None and sh > 0:
         cur["proceeds"] += sh * c[-1]; cur.update(exit_i=n - 1, open=True); trades.append(cur)
     tr = pd.DataFrame(trades, columns=["entry_i", "exit_i", "entry_px", "cost", "proceeds", "open"])
+    tr["open"] = tr["open"].astype(bool)
     if len(tr):
         tr["ret"] = tr.proceeds / tr.cost - 1
         tr["entry_date"] = df.index[tr.entry_i.values]
