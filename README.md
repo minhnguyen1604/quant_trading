@@ -70,3 +70,19 @@ python scripts/backtesting_daily_optimize.py          # EMA9/WMA45 daily, buy on
 python scripts/backtesting_weekly_optimize.py         # EMA9/WMA45 weekly, buy Friday close / sell Monday open
 python scripts/backtesting_weekly_optimize_ma5ma20.py # SMA5/SMA20 weekly, buy Friday close / sell Monday open
 ```
+
+### Trailing stop
+
+Every backtest script accepts `--trailing-stop N`: on top of the crossover exit, the position is closed
+(at the next bar's open) once a close falls N% below the highest close since entry. After such an exit the
+strategy only re-enters on a new crossover. Output DB names get a `_trailN` suffix so the plain results are
+not overwritten, e.g.:
+
+```bash
+python scripts/backtesting_weekly_optimize.py --trailing-stop 25   # -> backtest_weekly_optimize_ema9wma45_trail25.db
+```
+
+On weekly EMA9/WMA45 a 25% trailing stop was the only exit tweak tested that held up both in 2017-2022 and
+2023-2026: it cut the max drawdown in every sector group tested (most in real estate and steel) at roughly
+the same CAGR. Fixed take-profit levels hurt badly, because most of the profit comes from a few trades that
+more than double.

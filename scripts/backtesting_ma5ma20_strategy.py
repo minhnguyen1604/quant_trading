@@ -26,6 +26,9 @@ def calculate_sma(values, period):
 class SmaCrossover(Strategy):
     fast_period = 5
     slow_period = 20
+    # Optional trailing stop: exit when Close falls this fraction below the highest close since entry (0 = off)
+    trail_pct = 0.0
+    peak = None
 
     def init(self):
         # Calculate SMA5 and SMA20
@@ -33,12 +36,23 @@ class SmaCrossover(Strategy):
         self.slow_ma = self.I(calculate_sma, self.data.Close, self.slow_period)
 
     def next(self):
+        if not self.position:
+            self.peak = None
         # Buy: SMA5 crosses above SMA20
         if crossover(self.fast_ma, self.slow_ma):
             self.buy()
-        # Exit: SMA5 crosses below SMA20 (close position)
-        elif crossover(self.slow_ma, self.fast_ma):
+        # Exit: SMA5 crosses below SMA20, or the optional trailing stop is hit
+        elif crossover(self.slow_ma, self.fast_ma) or self.trailing_stop_hit():
             self.position.close()
+
+    def trailing_stop_hit(self):
+        if not self.position or not self.trail_pct:
+            return False
+        close = self.data.Close[-1]
+        if self.peak is None:
+            self.peak = self.trades[-1].entry_price
+        self.peak = max(self.peak, close)
+        return close <= self.peak * (1 - self.trail_pct)
 
 def clean_val(val):
     if pd.isna(val) or val == np.inf or val == -np.inf:
@@ -47,7 +61,7 @@ def clean_val(val):
         return val.item()
     return val
 
-def run_backtest_for_table(db_path, table_name, out_db_path, cash, commission):
+def run_backtest_for_table(db_path, table_name, out_db_path, cash, commission, trail_pct=0.0):
     print(f"\n=== Running backtest on table: {table_name} ===")
     if not os.path.exists(db_path):
         print(f"Error: Source database {db_path} does not exist.")
@@ -97,7 +111,7 @@ def run_backtest_for_table(db_path, table_name, out_db_path, cash, commission):
 
         try:
             bt = Backtest(df_ticker, SmaCrossover, cash=cash, commission=commission)
-            stats = bt.run()
+            stats = bt.run(trail_pct=trail_pct)
             
             res = {
                 'Ticker': ticker,
@@ -151,6 +165,13 @@ def run_backtest_for_table(db_path, table_name, out_db_path, cash, commission):
 
     print(f"Saved {len(df_res)} results to {out_db_path}")
 
+def with_trailing_suffix(path, trailing_stop):
+    """Keep trailing-stop results apart from the plain crossover results, e.g. x.db -> x_trail25.db."""
+    if not trailing_stop:
+        return path
+    root, ext = os.path.splitext(path)
+    return f"{root}_trail{trailing_stop:g}{ext}"
+
 def main():
     parser = argparse.ArgumentParser(description="Backtest SMA5 vs SMA20 strategy")
     parser.add_argument("--db", default="data_prices.db", help="Source SQLite database path")
@@ -158,24 +179,27 @@ def main():
     parser.add_argument("--weekly-out", default="backtest_weekly_ma5ma20.db", help="Output database for weekly results")
     parser.add_argument("--cash", type=float, default=100000000.0, help="Initial cash/equity per ticker")
     parser.add_argument("--commission", type=float, default=0.0015, help="Commission per trade")
+    parser.add_argument("--trailing-stop", type=float, default=0.0, help="Trailing stop in percent below the highest close since entry, e.g. 25 (0 = off). Output DB names get a _trail<N> suffix")
     args = parser.parse_args()
 
     # Run Daily backtest
     run_backtest_for_table(
         db_path=args.db,
         table_name="daily_prices",
-        out_db_path=args.daily_out,
+        out_db_path=with_trailing_suffix(args.daily_out, args.trailing_stop),
         cash=args.cash,
-        commission=args.commission
+        commission=args.commission,
+        trail_pct=args.trailing_stop / 100
     )
 
     # Run Weekly backtest
     run_backtest_for_table(
         db_path=args.db,
         table_name="weekly_prices",
-        out_db_path=args.weekly_out,
+        out_db_path=with_trailing_suffix(args.weekly_out, args.trailing_stop),
         cash=args.cash,
-        commission=args.commission
+        commission=args.commission,
+        trail_pct=args.trailing_stop / 100
     )
 
 if __name__ == "__main__":

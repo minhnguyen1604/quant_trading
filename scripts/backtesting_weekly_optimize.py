@@ -54,16 +54,32 @@ def calculate_wma(values, period):
 class EmaWmaCrossover(Strategy):
     ema_period = 9
     wma_period = 45
+    # Optional trailing stop: exit when Close falls this fraction below the highest close since entry (0 = off)
+    trail_pct = 0.0
+    peak = None
 
     def init(self):
         self.ema = self.I(calculate_ema, self.data.Close, self.ema_period)
         self.wma = self.I(calculate_wma, self.data.Close, self.wma_period)
 
     def next(self):
+        if not self.position:
+            self.peak = None
+        # Buy: EMA9 crosses above WMA45
         if crossover(self.ema, self.wma):
             self.buy()
-        elif crossover(self.wma, self.ema):
+        # Exit: EMA9 crosses below WMA45, or the optional trailing stop is hit
+        elif crossover(self.wma, self.ema) or self.trailing_stop_hit():
             self.position.close()
+
+    def trailing_stop_hit(self):
+        if not self.position or not self.trail_pct:
+            return False
+        close = self.data.Close[-1]
+        if self.peak is None:
+            self.peak = self.trades[-1].entry_price
+        self.peak = max(self.peak, close)
+        return close <= self.peak * (1 - self.trail_pct)
 
 def clean_val(val):
     if pd.isna(val) or val == np.inf or val == -np.inf:
@@ -72,7 +88,7 @@ def clean_val(val):
         return val.item()
     return val
 
-def run_weekly_optimized_backtest(db_path, out_db_path, cash, commission):
+def run_weekly_optimized_backtest(db_path, out_db_path, cash, commission, trail_pct=0.0):
     print(f"\n=== Running Weekly Optimized Backtest (Buy on Friday Close, Sell on Monday Open) ===")
     if not os.path.exists(db_path):
         print(f"Error: Source database {db_path} does not exist.")
@@ -121,7 +137,7 @@ def run_weekly_optimized_backtest(db_path, out_db_path, cash, commission):
 
         try:
             bt = Backtest(df_ticker, EmaWmaCrossover, cash=cash, commission=commission)
-            stats = bt.run()
+            stats = bt.run(trail_pct=trail_pct)
             
             res = {
                 'Ticker': ticker,
@@ -175,19 +191,28 @@ def run_weekly_optimized_backtest(db_path, out_db_path, cash, commission):
 
     print(f"Saved {len(df_res)} results to {out_db_path}")
 
+def with_trailing_suffix(path, trailing_stop):
+    """Keep trailing-stop results apart from the plain crossover results, e.g. x.db -> x_trail25.db."""
+    if not trailing_stop:
+        return path
+    root, ext = os.path.splitext(path)
+    return f"{root}_trail{trailing_stop:g}{ext}"
+
 def main():
     parser = argparse.ArgumentParser(description="Backtest EMA9 vs WMA45 Weekly Optimized")
     parser.add_argument("--db", default="data_prices.db", help="Source SQLite database path")
     parser.add_argument("--weekly-out", default="backtest_weekly_optimize_ema9wma45.db", help="Output database for weekly optimized results")
     parser.add_argument("--cash", type=float, default=100000000.0, help="Initial cash/equity per ticker")
     parser.add_argument("--commission", type=float, default=0.0015, help="Commission per trade")
+    parser.add_argument("--trailing-stop", type=float, default=0.0, help="Trailing stop in percent below the highest close since entry, e.g. 25 (0 = off). Output DB names get a _trail<N> suffix")
     args = parser.parse_args()
 
     run_weekly_optimized_backtest(
         db_path=args.db,
-        out_db_path=args.weekly_out,
+        out_db_path=with_trailing_suffix(args.weekly_out, args.trailing_stop),
         cash=args.cash,
-        commission=args.commission
+        commission=args.commission,
+        trail_pct=args.trailing_stop / 100
     )
 
 if __name__ == "__main__":
