@@ -6,7 +6,7 @@ from backtesting.backtesting import _Broker
 import backtesting_ema9wma45_strategy as s
 
 conn = sqlite3.connect('data_prices.db')
-df = pd.read_sql_query('SELECT Date, Open, High, Low, Close, Volume FROM weekly_prices WHERE Ticker=\'SSI.VN\' ORDER BY Date ASC', conn)
+df = pd.read_sql_query('SELECT Date, Open, High, Low, Close, Volume FROM weekly_prices WHERE Ticker=\'SSI\' ORDER BY Date ASC', conn)
 conn.close()
 
 df['Date'] = pd.to_datetime(df['Date'])

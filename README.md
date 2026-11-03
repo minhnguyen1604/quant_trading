@@ -1,6 +1,7 @@
-# VNIndex Daily Crawler
+# HOSE Daily Crawler & Backtests
 
-Script to crawl historical daily OHLCV data for VNINDEX components from 2017-01-01 to present.
+Script to crawl adjusted historical daily OHLCV data for HOSE-listed stocks from 2017-01-01 to present,
+store it in SQLite and backtest moving-average crossover strategies on it.
 
 Usage
 ------
@@ -15,47 +16,57 @@ pip install -r requirements.txt
 2. Run the crawler:
 
 ```bash
-python scripts/crawl_vnindex.py --outdir data --start 2017-01-01
+python scripts/crawl_vnindex.py --hose --outdir data_hose_daily --weekly-outdir data_hose_weekly --start 2017-01-01
 ```
 
-Notes
------
-- The script scrapes the VNINDEX components page on Yahoo Finance. If scraping fails, provide a ticker list with `--source-list` (one ticker per line).
-- The downloader uses `yfinance` and attempts common Vietnam suffixes like `.VN`, `.HO`, and `.HS` when needed.
-- When `--hose` is passed, the script first tries VNDIRECT to get all HOSE symbols; if that fails, it automatically falls back to querying HSX public search endpoints.
-- To refresh daily data without re-downloading the full history, use `--refresh`.
+Data sources
+------------
+- **Symbol list:** SSI iBoard (`iboard-query.ssi.com.vn`), stocks only (no fund certificates, ETFs or
+  covered warrants). Falls back to the HSX public search API.
+- **Prices:** KBS (`kbbuddywts.kbsec.com.vn`), falling back to SSI iBoard's chart API
+  (`iboard-api.ssi.com.vn`). These are the public, unofficial endpoints behind the brokers' web price
+  boards, so they may change without notice. Prices are in VND and back-adjusted for cash dividends,
+  bonus shares and splits. KBS is preferred because it returns prices to the đồng, while SSI rounds to
+  10 đồng.
+- Zero-volume rows (filler bars that carry the previous price) are dropped, and today's bar is skipped
+  while the session is still open (before 15:00 Vietnam time).
+- Weekly bars are resampled from the daily data and labelled with the Monday of each week.
+- Adjusted history changes after every corporate action, so each run re-downloads the full range and
+  overwrites the CSVs instead of appending. `normalize_and_store.py` likewise replaces each ticker's rows.
+- Only currently listed stocks are crawled, so backtests still carry survivorship bias.
 
-Daily refresh example
----------------------
-
-```bash
-python scripts/crawl_vnindex.py --outdir data_hose --start 2017-01-01 --hose --refresh
-```
-
-This will append only new rows to existing CSV files based on the last saved `Date`. If a ticker file does not exist yet, it downloads the full requested range.
+Use `--source-list tickers.txt` (one ticker per line, e.g. `FPT`) to crawl a custom list.
 
 Normalize & store into SQLite
 -----------------------------
 
-After you have collected CSVs (for example in `data_hose`), you can normalize
-their messy header format and load them into a single SQLite DB with:
+After you have collected CSVs, load them into a single SQLite DB with:
 
 ```bash
-# Normalize Daily prices
-python scripts/normalize_and_store.py --indir data_hose --db data_prices.db --table daily_prices
+# Daily prices
+python scripts/normalize_and_store.py --indir data_hose_daily --db data_prices.db --table daily_prices
 
-# Normalize Weekly prices
+# Weekly prices
 python scripts/normalize_and_store.py --indir data_hose_weekly --db data_prices.db --table weekly_prices
 ```
 
 For testing you can process only a few files with `--limit N` and optionally
 write cleaned CSVs to `--outdir cleaned_data`.
 
-Example (test 5 files and write cleaned CSVs):
+The script creates/updates table `daily_prices` and `weekly_prices` in the SQLite file with columns:
+`Ticker, Date, Close, High, Low, Open, Volume` (plus `Sector, Industry`, looked up once per ticker via yfinance).
+
+`run_daily.bat` (or `python scripts/run_daily_update.py`) runs the crawl and both store steps in one go.
+
+Backtests
+---------
+
+Each script reads `data_prices.db` and writes one `results` table per output DB, one row per ticker:
 
 ```bash
-python scripts/normalize_and_store.py --indir data_hose --outdir cleaned_data --db data_prices_test.db --limit 5
+python scripts/backtesting_ema9wma45_strategy.py      # EMA9/WMA45, daily + weekly
+python scripts/backtesting_ma5ma20_strategy.py        # SMA5/SMA20, daily + weekly
+python scripts/backtesting_daily_optimize.py          # EMA9/WMA45 daily, buy on close / sell on open
+python scripts/backtesting_weekly_optimize.py         # EMA9/WMA45 weekly, buy Friday close / sell Monday open
+python scripts/backtesting_weekly_optimize_ma5ma20.py # SMA5/SMA20 weekly, buy Friday close / sell Monday open
 ```
-
-The script creates/updates table `daily_prices` and `weekly_prices` in the SQLite file with columns:
-`Ticker, Date, Close, High, Low, Open, Volume`.

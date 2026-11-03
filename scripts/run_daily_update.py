@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Run full daily update: crawl HOSE (refresh) then normalize CSVs and store into SQLite.
+Run full daily update: crawl HOSE (full adjusted history) then normalize CSVs and store into SQLite.
 
 Usage:
-    python scripts/run_daily_update.py --outdir data_hose --db data_prices.db
+    python scripts/run_daily_update.py --outdir data_hose_daily --db data_prices.db
 
 This script calls `crawl_vnindex.py` and then `normalize_and_store.py` using
 the same Python interpreter. It writes a small log file `daily_run.log` by
@@ -32,7 +32,8 @@ def main(outdir: str, db: str, start: str, end: str, limit: int, log: str):
         outdir_weekly = outdir + "_weekly"
 
 
-    crawl_cmd = [py, str(repo / "scripts" / "crawl_vnindex.py"), "--outdir", outdir, "--start", start, "--end", end, "--hose", "--refresh", "--interval", "1d"]
+    # one crawl writes both daily and weekly (resampled) CSVs
+    crawl_cmd = [py, str(repo / "scripts" / "crawl_vnindex.py"), "--outdir", outdir, "--weekly-outdir", outdir_weekly, "--start", start, "--end", end, "--hose"]
     if limit:
         crawl_cmd += ["--source-list", "tickers.txt"]
 
@@ -40,21 +41,18 @@ def main(outdir: str, db: str, start: str, end: str, limit: int, log: str):
     if limit:
         normalize_cmd += ["--limit", str(limit)]
 
-    crawl_cmd_weekly = [py, str(repo / "scripts" / "crawl_vnindex.py"), "--outdir", outdir_weekly, "--start", start, "--end", end, "--hose", "--refresh", "--interval", "1wk"]
-    if limit:
-        crawl_cmd_weekly += ["--source-list", "tickers.txt"]
-
     normalize_cmd_weekly = [py, str(repo / "scripts" / "normalize_and_store.py"), "--indir", outdir_weekly, "--db", db, "--table", "weekly_prices"]
     if limit:
         normalize_cmd_weekly += ["--limit", str(limit)]
 
     try:
-        print("--- RUNNING DAILY UPDATE ---")
+        print("--- RUNNING CRAWL (DAILY + WEEKLY) ---")
         run(crawl_cmd, log)
+
+        print("--- STORING DAILY ---")
         run(normalize_cmd, log)
-        
-        print("--- RUNNING WEEKLY UPDATE ---")
-        run(crawl_cmd_weekly, log)
+
+        print("--- STORING WEEKLY ---")
         run(normalize_cmd_weekly, log)
     except SystemExit as e:
         print(e)

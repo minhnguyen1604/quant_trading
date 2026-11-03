@@ -3,12 +3,14 @@
 Normalize price CSV files and store cleaned data into a single SQLite database table.
 
 Behavior:
-- Input CSVs are expected in the messy multi-row header format produced by
-  the crawler (two header rows: metrics row and ticker row, followed by Date index).
+- Input CSVs are either the plain format written by the current crawler
+  (Date,Open,High,Low,Close,Volume) or the old messy yfinance format (two header
+  rows: metrics row and ticker row, followed by Date index).
 - The script extracts the per-ticker metric columns (Close/High/Low/Open/Volume),
   drops the extra header rows, renames the index to `Date` and writes a single
-  consolidated table `prices` in SQLite with columns:
+  consolidated table in SQLite with columns:
     Ticker, Date, Close, High, Low, Open, Volume
+- Each ticker's existing rows are replaced, since adjusted history changes over time.
 
 Usage:
     python scripts/normalize_and_store.py --indir data_hose --db data_prices.db
@@ -39,23 +41,32 @@ def clean_file(path: str, outdir: Optional[str] = None) -> Optional[pd.DataFrame
     basename = os.path.basename(path)
     ticker = os.path.splitext(basename)[0]
 
+    # Old yfinance CSVs have a second header row starting with "Ticker,"; the current
+    # crawler writes a plain single-row header (Date,Open,High,Low,Close,Volume).
+    with open(path, "r", encoding="utf-8") as f:
+        f.readline()
+        multi_header = f.readline().startswith("Ticker,")
+
+    if not multi_header:
+        try:
+            df2 = pd.read_csv(path, header=0, index_col=0, parse_dates=True)
+        except Exception:
+            return None
+        df2.index.name = "Date"
+        cols = [c for c in ["Close", "High", "Low", "Open", "Volume"] if c in df2.columns]
+        if not cols:
+            return None
+        cleaned = df2[cols].rename_axis("Date").reset_index()
+        cleaned["Ticker"] = ticker
+        if outdir:
+            os.makedirs(outdir, exist_ok=True)
+            cleaned.to_csv(os.path.join(outdir, basename), index=False)
+        return cleaned
+
     try:
         df = pd.read_csv(path, header=[0, 1], index_col=0, parse_dates=True)
     except Exception:
-        # fallback: try reading single-row header and assume it's already OK
-        try:
-            df2 = pd.read_csv(path, header=0, index_col=0, parse_dates=True)
-            df2.index.name = "Date"
-            # ensure required columns exist
-            cols = [c for c in ["Close", "High", "Low", "Open", "Volume"] if c in df2.columns]
-            if not cols:
-                return None
-            cleaned = df2[[c for c in ["Close", "High", "Low", "Open", "Volume"] if c in df2.columns]]
-            cleaned = cleaned.rename_axis("Date").reset_index()
-            cleaned["Ticker"] = ticker
-            return cleaned
-        except Exception:
-            return None
+        return None
 
     # columns are MultiIndex: (metric, ticker)
     if df.columns.nlevels == 2:
@@ -136,6 +147,22 @@ def store_to_sqlite(df: pd.DataFrame, conn: sqlite3.Connection, table: str = "da
         cleaned_rows.append(cleaned_row)
 
     cur = conn.cursor()
+    # Adjusted prices are rewritten after every corporate action, so replace the ticker's
+    # whole history instead of merging with rows that may have been dropped upstream.
+    tickers = list(dict.fromkeys(df["Ticker"]))
+    # Keep already-known sectors so the backfill does not have to look them up again
+    saved_sectors = {}
+    try:
+        for t in tickers:
+            row = cur.execute(
+                f"SELECT Sector, Industry FROM {table} WHERE Ticker = ? AND Sector IS NOT NULL LIMIT 1", (t,)
+            ).fetchone()
+            if row:
+                saved_sectors[t] = row
+    except sqlite3.OperationalError:
+        # table created under the old schema without Sector/Industry columns
+        pass
+    cur.executemany(f"DELETE FROM {table} WHERE Ticker = ?", [(t,) for t in tickers])
     query = f"""
         INSERT INTO {table} (Ticker, Date, Close, High, Low, Open, Volume)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -147,6 +174,10 @@ def store_to_sqlite(df: pd.DataFrame, conn: sqlite3.Connection, table: str = "da
             Volume=excluded.Volume
     """
     cur.executemany(query, cleaned_rows)
+    cur.executemany(
+        f"UPDATE {table} SET Sector = ?, Industry = ? WHERE Ticker = ?",
+        [(sector, industry, t) for t, (sector, industry) in saved_sectors.items()],
+    )
     conn.commit()
 
 

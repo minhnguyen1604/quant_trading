@@ -1,91 +1,77 @@
 #!/usr/bin/env python3
 """
-Crawl historical daily prices for VNINDEX components and HOSE-listed symbols from 2017-01-01 to today.
+Crawl historical daily prices for HOSE-listed stocks from 2017-01-01 to today.
 
 Approach:
-- Try to fetch index components from Yahoo Finance components page by default.
-- When `--hose` is used, fetch HOSE-listed symbols from VNDIRECT or HSX search fallback.
-- For each symbol, attempt downloads via `yfinance`. Try variants with common VN suffixes.
-- Save per-ticker CSV into `data/`.
+- Get the list of HOSE stocks from SSI iBoard (fallback: HSX search API).
+- For each symbol, download adjusted daily OHLCV from KBS (fallback: SSI iBoard chart API).
+  Both are the public endpoints behind the brokers' web price boards; prices are in VND
+  and back-adjusted for dividends, bonus shares and splits.
+- Save per-ticker CSV (columns: Date,Open,High,Low,Close,Volume) into `--outdir`, and
+  optionally weekly bars resampled from the daily data into `--weekly-outdir`.
+
+Because adjusted history changes after every corporate action, each run re-downloads the
+full range and overwrites the CSV instead of appending.
 
 Usage:
-    python scripts/crawl_vnindex.py --outdir data --start 2017-01-01
-    python scripts/crawl_vnindex.py --outdir data_hose --hose --start 2017-01-01
+    python scripts/crawl_vnindex.py --hose --outdir data_hose_daily --weekly-outdir data_hose_weekly
+    python scripts/crawl_vnindex.py --source-list tickers.txt --outdir data_hose_daily
 """
 import argparse
 import datetime as dt
 import os
 import time
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 import requests
-import yfinance as yf
-from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 
-VNDIRECT_STOCKS_API = "https://finfo-api.vndirect.com.vn/v4/stocks"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+
+SSI_HOSE_LIST_URL = "https://iboard-query.ssi.com.vn/stock/exchange/hose"
+SSI_CHART_URL = "https://iboard-api.ssi.com.vn/statistics/charts/history"
+KBS_DAILY_URL = "https://kbbuddywts.kbsec.com.vn/iis-server/investment/stocks/{symbol}/data_day"
+
 HSX_SEARCH_URL = "https://api.hsx.vn/q/api/v1/search"
 HSX_SEARCH_INDEX = "securities"
 HSX_SEARCH_FIELDS = "code^2,isin,figi,introduction"
 HSX_SEARCH_PAGE_SIZE = 100
 HSX_SEARCH_PREFIX_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-YAHOO_COMPONENTS_URL = "https://finance.yahoo.com/quote/%5EVNINDEX/components?p=%5EVNINDEX"
+VN_TZ = "Asia/Ho_Chi_Minh"
+MARKET_CLOSE_HOUR = 15
+PRICE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+
+session = requests.Session()
+session.headers.update({"User-Agent": USER_AGENT})
 
 
-def get_components_from_yahoo() -> List[str]:
-    resp = requests.get(YAHOO_COMPONENTS_URL, headers={"User-Agent": "curl/7.64.1"}, timeout=15)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    # Yahoo lists components in a table; tickers are in the first column as links
-    tickers = []
-    table = soup.find("table")
-    if not table:
-        return tickers
-    for row in table.find_all("tr"):
-        cols = row.find_all("td")
-        if not cols:
-            continue
-        a = cols[0].find("a")
-        if a and a.text:
-            tickers.append(a.text.strip())
-    # Deduplicate
-    return list(dict.fromkeys(tickers))
-
-
-def get_hose_list_from_vndirect() -> List[str]:
-    """Retrieve list of HOSE-listed symbols from VNDIRECT public API.
+def get_hose_list_from_ssi() -> List[str]:
+    """Retrieve HOSE-listed stock symbols (excluding fund certificates) from SSI iBoard.
 
     Falls back to an empty list on error.
     """
-    symbols = []
     try:
-        params = {"exchange": "HOSE", "size": 1000}
-        resp = requests.get(VNDIRECT_STOCKS_API, params=params, timeout=15)
+        resp = session.get(SSI_HOSE_LIST_URL, headers={"Referer": "https://iboard.ssi.com.vn/"}, timeout=20)
         resp.raise_for_status()
-        data = resp.json()
-        for item in data.get("data", []):
-            sym = item.get("symbol")
-            if sym:
-                symbols.append(sym.strip())
+        items = resp.json().get("data", [])
     except Exception:
         return []
-    return list(dict.fromkeys(symbols))
+    symbols = [item["stockSymbol"].strip() for item in items if item.get("stockType") == "s" and item.get("stockSymbol")]
+    return sorted(set(symbols))
 
 
 def get_hose_list_from_hsx(query_prefixes: List[str] = None, show_progress: bool = True) -> List[str]:
     """Retrieve HOSE-listed symbols by scraping HSX search API.
 
-    This is a fallback when VNDIRECT is unavailable.
+    This is a fallback when SSI is unavailable.
     """
     if query_prefixes is None:
         chars = HSX_SEARCH_PREFIX_CHARS
         query_prefixes = [a + b for a in chars for b in chars]
 
-    session = requests.Session()
-    session.headers.update({"User-Agent": "curl/7.64.1"})
     symbols = set()
 
     for prefix in tqdm(query_prefixes, desc="HOSE prefix scan", disable=not show_progress):
@@ -127,116 +113,120 @@ def get_hose_list_from_hsx(query_prefixes: List[str] = None, show_progress: bool
 
 
 def get_hose_list() -> List[str]:
-    symbols = get_hose_list_from_vndirect()
+    symbols = get_hose_list_from_ssi()
     if symbols:
         return symbols
 
-    print("VNDIRECT unreachable or blocked; falling back to HSX search-based symbol discovery...")
-    symbols = get_hose_list_from_hsx()
-    return symbols
+    print("SSI unreachable or blocked; falling back to HSX search-based symbol discovery...")
+    return get_hose_list_from_hsx()
 
 
-def normalize_candidate_symbols(sym: str) -> List[str]:
-    # If symbol already contains a dot or suffix, try it as-is first
-    candidates = []
-    if "." in sym:
-        candidates.append(sym)
-    else:
-        # common Yahoo Vietnam suffix
-        # DO NOT append bare sym without suffix to avoid downloading US stocks (e.g. AMD instead of AMD.VN)
-        candidates.extend([sym + ".VN", sym + ".HO", sym + ".HS"])
-    # ensure uniqueness while preserving order
-    seen = set()
-    out = []
-    for s in candidates:
-        if s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out
+def _empty_prices() -> pd.DataFrame:
+    return pd.DataFrame(columns=PRICE_COLUMNS, index=pd.DatetimeIndex([], name="Date"))
 
 
-def download_for_symbol(symbol: str, start: str, end: str, interval: str = "1d") -> pd.DataFrame:
-    # try yfinance download for a ticker symbol
-    try:
-        df = yf.download(symbol, start=start, end=end, interval=interval, progress=False, threads=False)
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            df.index = pd.to_datetime(df.index)
-            return df
-    except Exception:
-        pass
-    return pd.DataFrame()
+def fetch_kbs(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Adjusted daily OHLCV from KBS, prices in VND."""
+    params = {
+        "sdate": dt.datetime.strptime(start, "%Y-%m-%d").strftime("%d-%m-%Y"),
+        "edate": dt.datetime.strptime(end, "%Y-%m-%d").strftime("%d-%m-%Y"),
+    }
+    resp = session.get(KBS_DAILY_URL.format(symbol=symbol), params=params, timeout=30)
+    resp.raise_for_status()
+    rows = resp.json().get("data_day") or []
+    if not rows:
+        return _empty_prices()
+    df = pd.DataFrame(rows).rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
+    df["Date"] = pd.to_datetime(df["t"]).dt.normalize()
+    # KBS may return two rows for the latest session; keep the settled one (largest volume)
+    df = df.sort_values(["Date", "Volume"]).drop_duplicates("Date", keep="last")
+    return df.set_index("Date")[PRICE_COLUMNS]
 
 
-def append_or_write_csv(fname: str, df: pd.DataFrame):
-    if os.path.exists(fname):
+def fetch_ssi(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Adjusted daily OHLCV from SSI iBoard. SSI quotes prices in thousand VND; convert to VND."""
+    start_ts = int(pd.Timestamp(start, tz=VN_TZ).timestamp())
+    end_ts = int((pd.Timestamp(end, tz=VN_TZ) + pd.Timedelta(days=1)).timestamp())
+    params = {"resolution": "1D", "symbol": symbol, "from": start_ts, "to": end_ts}
+    resp = session.get(SSI_CHART_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json().get("data") or {}
+    if not data.get("t"):
+        return _empty_prices()
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(data["t"], unit="s", utc=True).tz_convert(VN_TZ).normalize().tz_localize(None),
+        "Open": data["o"], "High": data["h"], "Low": data["l"], "Close": data["c"], "Volume": data["v"],
+    })
+    df[["Open", "High", "Low", "Close"]] = (df[["Open", "High", "Low", "Close"]] * 1000).round(2)
+    df = df.drop_duplicates("Date", keep="last")
+    return df.set_index("Date")[PRICE_COLUMNS]
+
+
+def clean_prices(df: pd.DataFrame, end: str) -> pd.DataFrame:
+    df = df.apply(pd.to_numeric, errors="coerce").dropna()
+    df = df[(df[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]
+    # Zero-volume rows are filler bars (price carried over from the previous session), not trades
+    df = df[df["Volume"] > 0].copy()
+    # A small share of upstream bars have Open/Close outside High/Low; widen the range to contain them
+    df["High"] = df[["Open", "High", "Close"]].max(axis=1)
+    df["Low"] = df[["Open", "Low", "Close"]].min(axis=1)
+    # Drop today's bar while the session is still running, it is not final yet
+    now = pd.Timestamp.now(tz=VN_TZ)
+    if end >= now.strftime("%Y-%m-%d") and now.hour < MARKET_CLOSE_HOUR:
+        df = df[df.index < now.normalize().tz_localize(None)]
+    df = df[df.index <= pd.Timestamp(end)]
+    return df.sort_index()
+
+
+def download_for_symbol(symbol: str, start: str, end: str) -> pd.DataFrame:
+    for fetch in (fetch_kbs, fetch_ssi):
         try:
-            existing = pd.read_csv(fname, header=[0, 1], index_col=0)
-            existing.index = pd.to_datetime(existing.index, errors="coerce")
-            existing = existing[existing.index.notna()]
-            
-            # Ensure the newly downloaded df also has datetime index
-            df.index = pd.to_datetime(df.index, errors="coerce")
-            df = df[df.index.notna()]
-            
-            combined = pd.concat([existing, df])
-            combined = combined[~combined.index.duplicated(keep="last")]
-            combined.sort_index(inplace=True)
-            combined.to_csv(fname, index_label="Date")
+            df = clean_prices(fetch(symbol, start, end), end)
         except Exception:
-            df.to_csv(fname, index_label="Date")
-    else:
-        df.to_csv(fname, index_label="Date")
+            continue
+        if not df.empty:
+            return df
+    return _empty_prices()
 
 
-def crawl_all(outdir: str, start: str, end: str, source_list: str = None, use_hose: bool = False, refresh: bool = False, interval: str = "1d"):
+def to_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """Resample daily bars into weekly bars labelled with the Monday of each week."""
+    week = df.index - pd.to_timedelta(df.index.weekday, unit="D")
+    weekly = df.groupby(week).agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
+    weekly.index.name = "Date"
+    return weekly
+
+
+def write_csv(df: pd.DataFrame, fname: str):
+    df.to_csv(fname, index_label="Date", date_format="%Y-%m-%d")
+
+
+def crawl_all(outdir: str, start: str, end: str, source_list: Optional[str] = None, weekly_outdir: Optional[str] = None):
     os.makedirs(outdir, exist_ok=True)
+    if weekly_outdir:
+        os.makedirs(weekly_outdir, exist_ok=True)
+
     if source_list:
         with open(source_list, "r", encoding="utf-8") as f:
             symbols = [line.strip() for line in f if line.strip() and not line.startswith("#")]
     else:
-        if use_hose:
-            symbols = get_hose_list()
-            if not symbols:
-                print("Failed to fetch HOSE list from VNDIRECT, falling back to Yahoo scraping...")
-                symbols = get_components_from_yahoo()
-        else:
-            symbols = get_components_from_yahoo()
+        symbols = get_hose_list()
     if not symbols:
-        print("No symbols found from Yahoo. Provide --source-list with tickers.")
+        print("No symbols found. Provide --source-list with tickers.")
         return
 
     print(f"Found {len(symbols)} symbols, attempting downloads...")
     failures = []
     for sym in tqdm(symbols, desc="tickers"):
-        tried = False
-        for cand in normalize_candidate_symbols(sym):
-            fname = os.path.join(outdir, f"{cand.replace('/', '_')}.csv")
-            download_start = start
-            if refresh and os.path.exists(fname):
-                try:
-                    existing = pd.read_csv(fname, header=[0, 1], index_col=0)
-                    existing.index = pd.to_datetime(existing.index, errors="coerce")
-                    valid_dates = existing.index[existing.index.notna()]
-                    if not valid_dates.empty:
-                        last_date = valid_dates.max()
-                        download_start = last_date.strftime("%Y-%m-%d")
-                        if download_start >= end:
-                            tried = True
-                            break
-                except Exception:
-                    pass
-            df = download_for_symbol(cand, download_start, end, interval=interval)
-            if not df.empty:
-                if refresh and os.path.exists(fname):
-                    append_or_write_csv(fname, df)
-                else:
-                    df.to_csv(fname, index_label="Date")
-                tried = True
-                # be polite
-                time.sleep(0.5)
-                break
-        if not tried:
+        df = download_for_symbol(sym, start, end)
+        if df.empty:
             failures.append(sym)
+            continue
+        write_csv(df, os.path.join(outdir, f"{sym}.csv"))
+        if weekly_outdir:
+            write_csv(to_weekly(df), os.path.join(weekly_outdir, f"{sym}.csv"))
+        # be polite
+        time.sleep(0.3)
 
     if failures:
         print("Failed to download for these symbols:")
@@ -247,25 +237,16 @@ def crawl_all(outdir: str, start: str, end: str, source_list: str = None, use_ho
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Crawl VNINDEX components historical daily data")
-    p.add_argument("--outdir", default="data", help="Output directory for CSV files")
+    p = argparse.ArgumentParser(description="Crawl HOSE historical daily (and weekly) prices from KBS / SSI")
+    p.add_argument("--outdir", default="data_hose_daily", help="Output directory for daily CSV files")
+    p.add_argument("--weekly-outdir", help="Optional output directory for weekly CSV files resampled from daily data")
     p.add_argument("--start", default="2017-01-01", help="Start date YYYY-MM-DD")
     p.add_argument("--end", default=dt.datetime.today().strftime("%Y-%m-%d"), help="End date YYYY-MM-DD")
-    p.add_argument("--source-list", help="Optional file with one ticker per line to use instead of scraping")
-    p.add_argument("--hose", action="store_true", help="Use HOSE-listed tickers from VNDIRECT API instead of Yahoo components")
-    p.add_argument("--refresh", action="store_true", help="Refresh existing CSV files by downloading only new data since the last saved date")
-    p.add_argument("--interval", default="1d", choices=["1d", "1wk"], help="Download interval (1d for daily, 1wk for weekly)")
+    p.add_argument("--source-list", help="Optional file with one ticker per line instead of the HOSE list")
+    p.add_argument("--hose", action="store_true", help="Crawl all HOSE-listed stocks (default when --source-list is not given)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    crawl_all(
-        args.outdir,
-        args.start,
-        args.end,
-        args.source_list,
-        getattr(args, "hose", False),
-        getattr(args, "refresh", False),
-        getattr(args, "interval", "1d"),
-    )
+    crawl_all(args.outdir, args.start, args.end, args.source_list, args.weekly_outdir)
