@@ -86,3 +86,29 @@ On weekly EMA9/WMA45 a 25% trailing stop was the only exit tweak tested that hel
 2023-2026: it cut the max drawdown in every sector group tested (most in real estate and steel) at roughly
 the same CAGR. Fixed take-profit levels hurt badly, because most of the profit comes from a few trades that
 more than double.
+
+Analysis (weekly EMA9/WMA45)
+----------------------------
+
+`analysis/` holds the statistical evaluation behind those conclusions. It reads `data_prices.db` and uses a
+fast re-implementation of the backtest (`analysis/common.py`, matches `backtesting.py` to ~0.01pp):
+
+| Script | What it measures |
+|---|---|
+| `01_overview.py` | All HOSE stocks: win rate with CI, trade return distribution, MAE / peak gain vs exit, per-ticker vs buy & hold, portfolio vs buy & hold and VNINDEX, calendar years |
+| `02_robustness.py` | Random-entry Monte Carlo, parameter grid, MA types, costs, liquidity at entry, market regime, sub-periods |
+| `03_sectors.py` | Securities, real estate, banks, steel, transport, VN30 vs the other sectors; 2018-2025 annual returns per group |
+| `04_exits.py` | 26 exit rules (trailing stops, break-even, take-profit, stop-loss, faster exits) chosen on 2017-2022 and checked on 2023-2026; trailing stop per sector; effect on the big winners |
+
+```bash
+python analysis/run_all.py      # ~15 min; reports go to analysis/output/*.txt
+```
+
+`analysis/output/` contains the reports as of the committed data (prices up to 2026-11-03). To reproduce
+them exactly, rebuild `data_prices.db` from the committed CSVs instead of re-crawling, with the pinned
+versions in `requirements.txt`. Inputs that would otherwise change over time are snapshotted:
+`analysis/industries.csv` (yfinance industry per ticker, used for the sector groups),
+`analysis/vnindex_daily.csv` (benchmark) and the VN30 basket in `common.py`.
+
+Caveats that apply to all of it: only currently listed stocks (survivorship bias), VN30 uses today's members,
+and most of the profit comes from the 2020-2021 cycle.

@@ -1,5 +1,8 @@
-yfinance
-pandas
-requests
-backtesting
-tqdm
+# Versions the published results were produced with (Python 3.13).
+# backtesting is pinned on purpose: its "Buy & Hold Return" definition changed between releases.
+backtesting==0.6.5
+numpy==2.2.2
+pandas==2.2.3
+requests==2.32.3
+tqdm==4.67.1
+yfinance==1.3.0

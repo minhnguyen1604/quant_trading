@@ -1,0 +1,69 @@
+# 01_overview  |  data: data_prices.db, commission 0.15%/side
+====================================================================================================
+A. TRADE-LEVEL (closed trades, signal on Friday close, fill next Monday open)
+tickers=402  closed trades=2831  open trades=94  trades/ticker median=7
+Win rate = 36.7%  (95% CI 34.9-38.5%)
+Mean trade = 14.69%  median = -4.24%  std = 65.8%  skew = 5.30
+Avg win = 58.3%  avg loss = -10.5%  payoff = 5.53  profit factor = 3.20
+Expectancy 95% CI (month-cluster bootstrap) = 7.09% .. 22.78%   P(mean<=0)=0.0000
+Percentiles: {'p5': -22.2, 'p10': -17.8, 'p25': -11.0, 'p50': -4.2, 'p75': 10.1, 'p90': 62.0, 'p95': 116.5}
+Outcome distribution (% of trades): {'<-20%': 7.1, '-20..-10': 20.3, '-10..-5': 19.4, '-5..0': 16.6, '0..10': 11.6, '10..25': 7.0, '25..50': 6.5, '50..100': 5.5, '>100%': 6.1}
+Holding (weeks): median=20 | winners 49  losers 10
+MAE: median=-9.9%  P(<-10%)=49.7%  P(<-20%)=14.4% | winners P(MAE<-15%)=9.2%
+Concentration: top 5% trades = 83% of summed return; mean without top 10% = -2.00%
+
+By entry year:
+               n   win  mean  median
+entry_date                         
+2017         35  34.3   7.0    -4.2
+2018        315  27.3   2.9    -6.5
+2019        309  24.3  -2.2    -5.9
+2020        448  66.3  74.3    23.3
+2021        232  48.7  13.1    -0.6
+2022        151  15.9  -8.2    -8.1
+2023        401  48.1  15.3    -1.4
+2024        358  30.2   2.9    -5.1
+2025        402  29.4   1.1    -4.8
+2026        180   6.7  -8.9    -7.1
+
+Peak weekly close reached while holding -> final outcome
+  > +  0%:  77.1% of trades | of those: won  47.0%, ended < -5%:  37.6%
+  > +  5%:  61.4% of trades | of those: won  58.1%, ended < -5%:  28.2%
+  > + 10%:  51.2% of trades | of those: won  68.0%, ended < -5%:  20.4%
+  > + 15%:  43.7% of trades | of those: won  76.5%, ended < -5%:  15.0%
+  > + 20%:  38.3% of trades | of those: won  82.3%, ended < -5%:  10.6%
+  > + 30%:  31.0% of trades | of those: won  90.7%, ended < -5%:   5.6%
+  > + 50%:  22.3% of trades | of those: won  95.9%, ended < -5%:   2.8%
+  > +100%:  11.9% of trades | of those: won  99.4%, ended < -5%:   0.6%
+Winners: median peak 61.3% -> exit 24.0% (keep 51% of peak); give-back median 17.9pp, mean 29.9pp
+====================================================================================================
+B. PER TICKER vs buy & hold over the same window
+P(strategy > 0)       = 68.7% (CI 64.0-73.0%)
+P(strategy > B&H)     = 46.5% (CI 41.7-51.4%)
+P(MDD shallower)      = 83.6% (CI 79.6-86.9%)
+P(Sharpe > B&H)       = 44.3% (CI 39.4-49.2%)
+Median: ret 52.3% vs 55.2% | MDD -47.0% vs -63.5% | exposure 49%
+====================================================================================================
+C. PORTFOLIO (equal starting capital per ticker)
+2017-11-13 .. 2026-11-02 (465 weeks), average invested 52%
+                CAGR    Vol  Sharpe  Sortino    MDD  Calmar  PosWeeks   Total
+Strategy        9.52  11.30    0.86     0.95 -20.68    0.46     59.14  125.49
+Buy&Hold        9.97  17.24    0.64     0.72 -49.07    0.20     58.49  133.92
+52% B&H + cash  5.50   9.02    0.64     0.72 -29.07    0.19     58.49   61.45
+VNINDEX         7.80  19.69    0.48     0.61 -41.99    0.19     58.06   95.76
+beta vs VNINDEX 0.37, alpha 6.3%/yr, corr 0.64
+
+Calendar years (%):
+       Strategy   B&H  VNINDEX  expo%
+Date                                
+2017       0.3   6.7     13.4    5.8
+2018      -1.4  -2.6    -10.5   28.4
+2019       5.5   9.6      9.6   52.1
+2020      25.1  37.9     14.4   55.3
+2021      69.9  80.7     35.7   87.3
+2022     -16.3 -41.5    -32.8   41.1
+2023      11.1  28.3     12.2   57.1
+2024       9.1  13.5     11.0   63.5
+2025       5.7  11.7     42.2   58.2
+2026      -5.2 -13.4     -4.8   30.7
+Rolling 52w: P(>0)=75%  P(>VNINDEX)=64%  P(>B&H)=30%
