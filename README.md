@@ -112,3 +112,7 @@ versions in `requirements.txt`. Inputs that would otherwise change over time are
 
 Caveats that apply to all of it: only currently listed stocks (survivorship bias), VN30 uses today's members,
 and most of the profit comes from the 2020-2021 cycle.
+
+Follow-up studies (idle-cash interest, securities and banks, exits near the top, intraweek stops and re-entry,
+stock selection, shared-capital portfolios, a trade-by-trade Excel ledger) are in `analysis/research/`, with a
+Vietnamese summary of the findings in `analysis/research/tong_hop_hoi_thoai.md`.

@@ -16,3 +16,6 @@ __pycache__/
 # IDEs
 .vscode/
 .idea/
+
+# research scripts write intermediate pickles next to themselves
+analysis/research/*.pkl

@@ -138,14 +138,17 @@ def run_exit(df, rule=None, fast=9, slow=45, comm=COMM):
 
     rule keys: trail (fraction below the highest close since entry), be_after/be_level (once the peak
     close is be_after above entry, exit below entry*(1+be_level)), tp/tp_frac (limit take-profit),
-    sl (stop below entry, on close), fast_after/fast_ma (once up fast_after, exit on a close below fast_ma).
-    Close-based exits fill at the next open. Returns (trades, equity, start).
+    sl (stop below entry, on close), sl_intra (resting stop order below entry, intraweek), fast_after/fast_ma (once up fast_after, exit on a close below fast_ma).
+    Close-based exits fill at the next open, or at the signal bar's close with exit_on_close=True.
+    Returns (trades, equity, start).
     """
     rule = rule or {}
     trail, be_after, be_level = rule.get("trail"), rule.get("be_after"), rule.get("be_level", 0.0)
     tp, tp_frac, sl = rule.get("tp"), rule.get("tp_frac", 1.0), rule.get("sl")
+    sl_intra = rule.get("sl_intra")  # resting stop order below entry: fills at the stop, or at the open on a gap down
+    exit_on_close = rule.get("exit_on_close", False)  # close-based exits fill at that bar's close (ATC) instead of the next open
     fast_after, fast_ma = rule.get("fast_after"), rule.get("fast_ma", ("ema", 9))
-    o, h, c = df["Open"].values, df["High"].values, df["Close"].values
+    o, h, lo, c = df["Open"].values, df["High"].values, df["Low"].values, df["Close"].values
     n = len(c)
     up, dn, start = _signals(c, fast, slow, "ema", "wma")
     fm = MA[fast_ma[0]](c, fast_ma[1]) if fast_after is not None else None
@@ -161,6 +164,12 @@ def run_exit(df, rule=None, fast=9, slow=45, comm=COMM):
             cash += sh * o[i] * (1 - comm); cur["proceeds"] += sh * o[i] * (1 - comm); sh = 0.0
             cur["exit_i"] = i; trades.append(cur); cur = None
         pend = None
+        if sh > 0 and sl_intra is not None:
+            stop = cur["entry_px"] / (1 + comm) * (1 - sl_intra)
+            if lo[i] <= stop:
+                fill = min(o[i], stop) if i > cur["entry_i"] else stop
+                cash += sh * fill * (1 - comm); cur["proceeds"] += sh * fill * (1 - comm); sh = 0.0
+                cur["exit_i"] = i; trades.append(cur); cur = None
         if sh > 0 and tp is not None and not cur["tp_done"]:
             target = cur["entry_px"] / (1 + comm) * (1 + tp)
             if h[i] >= target:
@@ -181,7 +190,13 @@ def run_exit(df, rule=None, fast=9, slow=45, comm=COMM):
             if be_after is not None and cur["peak"] >= base * (1 + be_after) and c[i] < base * (1 + be_level): ex = True
             if sl is not None and c[i] <= base * (1 - sl): ex = True
             if fast_after is not None and cur["peak"] >= base * (1 + fast_after) and c[i] < fm[i]: ex = True
-            if ex: pend = "sell"
+            if ex and exit_on_close:
+                # sell in the closing auction of the signal bar instead of the next open
+                cash += sh * c[i] * (1 - comm); cur["proceeds"] += sh * c[i] * (1 - comm); sh = 0.0
+                cur["exit_i"] = i; trades.append(cur); cur = None
+                eq[i] = cash
+            elif ex:
+                pend = "sell"
         elif cur is None and up[i]:
             pend = "buy"
     if cur is not None and sh > 0:
